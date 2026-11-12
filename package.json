@@ -1,0 +1,19 @@
+{
+  "name": "videoconnectserver",
+  "version": "2.0.0",
+  "description": "Ultra-Fast Real-Time Matchmaking & WebRTC Signaling Server",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
