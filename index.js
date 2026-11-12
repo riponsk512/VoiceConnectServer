@@ -1,4 +1,4 @@
-// VideoConnectServer/index.js
+// VoiceConnectServer/index.js
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
@@ -27,12 +27,12 @@ const PORT = process.env.PORT || 5000;
 // ============================================================================
 // ⚙️ LIFECYCLE CONSTANTS (STRICT SEPARATION OF MATCHMAKING VS ACTIVE CALL)
 // ============================================================================
-const SERVER_INSTANCE_ID = `srv_${Date.now()}_${crypto
+const SERVER_INSTANCE_ID = `vsrv_${Date.now()}_${crypto
   .randomBytes(4)
   .toString("hex")}`;
 const QUEUE_MAX_WAIT_MS = 10000; // Strict 10.0s maximum matchmaking queue duration
 const QUEUE_HEARTBEAT_EXPIRY_MS = 4000; // Evict waiting user if queue pings stop > 4s
-const TRANSITION_HOLD_MAX_MS = 7500; // Max time allowed in 2s hold before both enter InCall
+const TRANSITION_HOLD_MAX_MS = 7500; // Max time allowed in 2s hold before both enter InCallScreenVoice
 const ACTIVE_CALL_DISCONNECT_TIMEOUT_MS = 8000; // Network loss / force-close detection timeout
 const ACTIVE_CALL_HEARTBEAT_LEASE_MS = 25000; // Lease expiry if client stops all heartbeats/packets
 const PROTECTED_DIALOG_GRACE_MS = 25000; // Grace window while picking gallery image or BT permission
@@ -44,11 +44,11 @@ function logEvent(category, message, details = null) {
   const ts = new Date().toISOString();
   if (details !== null && details !== undefined) {
     console.log(
-      `[${ts}] [${category}] ${message} ->`,
+      `[${ts}] [VOICE:${category}] ${message} ->`,
       typeof details === "object" ? JSON.stringify(details) : details
     );
   } else {
-    console.log(`[${ts}] [${category}] ${message}`);
+    console.log(`[${ts}] [VOICE:${category}] ${message}`);
   }
 }
 
@@ -79,7 +79,7 @@ function generateRoomId(length = 20) {
 }
 
 function generateAttemptId() {
-  return `att_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  return `vatt_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 }
 
 function nextUserGeneration(emailKey) {
@@ -104,7 +104,7 @@ function clearDisconnectTimer(emailKey) {
   }
 }
 
-// Idempotent Queue Removal: Cancels timers, marks attempt cancelled, and frees memory
+// Idempotent Queue Removal
 function removeFromWaitingQueue(
   emailKey,
   reason = "removed",
@@ -119,7 +119,7 @@ function removeFromWaitingQueue(
       setTimeout(() => cancelledAttempts.delete(existing.attemptId), 30000);
     }
     waitingQueue.delete(emailKey);
-    logEvent("QUEUE_REMOVE", `Removed ${emailKey} from waitingQueue`, {
+    logEvent("QUEUE_REMOVE", `Removed ${emailKey} from voice waitingQueue`, {
       attemptId: existing.attemptId,
       reason,
       remainingInQueue: waitingQueue.size,
@@ -128,7 +128,7 @@ function removeFromWaitingQueue(
   matchingLocks.delete(emailKey);
 }
 
-// Zombie-Safe Socket Binder: Binds user to current socket & updates active room heartbeat
+// Zombie-Safe Socket Binder
 function bindUserSocket(email, socket) {
   if (!email || !socket) return null;
   const emailKey = String(email).trim().toLowerCase();
@@ -171,8 +171,7 @@ function bindUserSocket(email, socket) {
 }
 
 // ============================================================================
-// 🛡️ STALE SIGNALING VALIDATOR (SECTION H)
-// Verifies room exists, sender belongs to room, and recipient is still in room
+// 🛡️ STALE SIGNALING VALIDATOR
 // ============================================================================
 function validateSignalingParticipant(roomId, socket, explicitEmail = null) {
   if (!roomId || !activeRooms.has(roomId)) return null;
@@ -331,13 +330,12 @@ function evaluateCompatibility(userA, userB) {
 }
 
 // ============================================================================
-// 🧹 IDEMPOTENT ROOM TEARDOWN & PARTNER NOTIFICATION (SECTIONS D, E, G)
+// 🧹 IDEMPOTENT ROOM TEARDOWN & PARTNER NOTIFICATION
 // ============================================================================
 function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
   if (!roomId || !activeRooms.has(roomId)) return;
   const room = activeRooms.get(roomId);
 
-  // Mark terminated and delete from activeRooms immediately so no further signaling is forwarded
   room.status = "terminated";
   room.offer = null;
   room.answer = null;
@@ -357,7 +355,6 @@ function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
   if (userToRoom.get(callerKey) === roomId) userToRoom.delete(callerKey);
   if (userToRoom.get(calleeKey) === roomId) userToRoom.delete(calleeKey);
 
-  // Leave Socket.IO room channel on both sockets
   const callerSockId = userToSocket.get(callerKey);
   const calleeSockId = userToSocket.get(calleeKey);
   if (callerSockId) io.sockets.sockets.get(callerSockId)?.leave(roomId);
@@ -371,7 +368,7 @@ function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
     (Date.now() - (room.createdAtMs || Date.now())) / 1000
   );
 
-  logEvent("ROOM_DESTROYED", `Room ${roomId} terminated & wiped from memory`, {
+  logEvent("ROOM_DESTROYED", `Voice room ${roomId} terminated & wiped`, {
     roomId,
     caller: room.caller,
     callee: room.callee,
@@ -388,7 +385,6 @@ function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
   const isLost =
     cleanReason === "disconnected" || cleanReason.includes("internet");
 
-  // Emit both transition-hold and active-call teardown events so partner is alerted regardless of screen
   io.to(partnerSocketId).emit("partner_disconnected_requeue", {
     roomId,
     action: cleanReason,
@@ -422,7 +418,7 @@ function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
     timestamp: Date.now(),
   });
 
-  logEvent("PARTNER_NOTIFIED", `Notified ${partnerEmail} of room teardown`, {
+  logEvent("PARTNER_NOTIFIED", `Notified ${partnerEmail} of voice room end`, {
     roomId,
     reason: cleanReason,
   });
@@ -432,15 +428,13 @@ function destroyRoomAndNotifyPartner(roomId, leaverEmail, reason = "ended") {
 // ⚡ SOCKET.IO CONNECTION & REAL-TIME LIFECYCLE ENGINE
 // ============================================================================
 io.on("connection", (socket) => {
-  logEvent("SOCKET_CONNECTED", `New socket connected: ${socket.id}`);
+  logEvent("SOCKET_CONNECTED", `New voice socket connected: ${socket.id}`);
 
-  // Send server instance ID immediately so client detects server restarts (Section F)
   socket.emit("server_hello", {
     serverInstanceId: SERVER_INSTANCE_ID,
     timestamp: Date.now(),
   });
 
-  // Update room heartbeat automatically whenever any packet arrives from this socket
   socket.conn.on("packet", () => {
     const emailKey = socketToUser.get(socket.id);
     if (!emailKey) return;
@@ -469,7 +463,6 @@ io.on("connection", (socket) => {
     const email = String(payload.email).trim();
     const emailKey = bindUserSocket(email, socket);
 
-    // Section F: If client thinks it is in a room that no longer exists (e.g. after server restart), tell client immediately
     if (payload.roomId && !activeRooms.has(payload.roomId)) {
       socket.emit("room_ended", {
         roomId: payload.roomId,
@@ -479,7 +472,7 @@ io.on("connection", (socket) => {
       });
     }
 
-    logEvent("USER_REGISTERED", `User registered: ${email}`, {
+    logEvent("USER_REGISTERED", `Voice user registered: ${email}`, {
       socketId: socket.id,
       screen: payload.screen || "unknown",
       activeRoomId: userToRoom.get(emailKey) || null,
@@ -510,7 +503,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Protect newly created match if a duplicate socket packet arrives within 4s
     const existingRoomId = userToRoom.get(myKey);
     if (existingRoomId && activeRooms.has(existingRoomId)) {
       const existingRoom = activeRooms.get(existingRoomId);
@@ -539,14 +531,12 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // If starting a fresh search (e.g., after NEXT or RETRY), terminate previous room first
       destroyRoomAndNotifyPartner(existingRoomId, myEmail, "left");
     }
 
     if (matchingLocks.has(myKey)) return;
     matchingLocks.add(myKey);
 
-    // Remove any previous queue entry for this user before registering the new attempt
     removeFromWaitingQueue(myKey, "new_attempt_started", false);
     const mySessionGen = nextUserGeneration(myKey);
 
@@ -561,7 +551,7 @@ io.on("connection", (socket) => {
       uid: payload.uid || null,
       name: payload.name || "Stranger",
       timeZone: payload.timeZone || "Asia/Kolkata",
-      mode: payload.mode || "video",
+      mode: payload.mode || "voice",
       age: Number(payload.age) || null,
       gender: payload.gender || null,
       location: myCountry,
@@ -581,7 +571,7 @@ io.on("connection", (socket) => {
       lastPing: now,
     };
 
-    logEvent("QUEUE_JOIN", `🔍 User searching: ${myEmail}`, {
+    logEvent("QUEUE_JOIN", `🔍 Voice user searching: ${myEmail}`, {
       attemptId: myEntry.attemptId,
       sessionGen: mySessionGen,
       gender: myEntry.gender,
@@ -593,7 +583,6 @@ io.on("connection", (socket) => {
 
     let matchedPartner = null;
 
-    // Scan waitingQueue for a compatible partner (Atomic 1-to-1 Lock)
     for (const [candKey, candidate] of waitingQueue.entries()) {
       if (candKey === myKey) continue;
       if (matchingLocks.has(candKey)) continue;
@@ -619,7 +608,6 @@ io.on("connection", (socket) => {
 
       const check = evaluateCompatibility(myEntry, candidate);
       if (check.compatible) {
-        // Lock & remove candidate synchronously so no 3rd user can ever match with them
         matchingLocks.add(candKey);
         removeFromWaitingQueue(candKey, "matched_1_to_1", false);
         matchedPartner = { ...candidate, socketId: candSocketId };
@@ -632,13 +620,12 @@ io.on("connection", (socket) => {
       }
     }
 
-    // 🎉 1-TO-1 MATCH ESTABLISHED: Cancel Both Queue Timers & Create Room in Memory
+    // 🎉 1-TO-1 VOICE MATCH ESTABLISHED
     if (matchedPartner) {
       const partnerKey = matchedPartner.email.toLowerCase();
       removeFromWaitingQueue(myKey, "matched_1_to_1", false);
       removeFromWaitingQueue(partnerKey, "matched_1_to_1", false);
 
-      // Verify neither user aborted or disconnected during the microsecond of matching
       const mySock = io.sockets.sockets.get(socket.id);
       const partnerSock = io.sockets.sockets.get(matchedPartner.socketId);
       if (
@@ -679,6 +666,7 @@ io.on("connection", (socket) => {
 
       const roomObject = {
         roomId,
+        mode: "voice",
         caller: matchedPartner.email,
         callee: myEntry.email,
         callerAttemptId: matchedPartner.attemptId,
@@ -697,14 +685,8 @@ io.on("connection", (socket) => {
         calleeProfile,
         callerMuted: false,
         calleeMuted: false,
-        callerVideoOff: false,
-        calleeVideoOff: false,
-        callerFilter: 0,
-        calleeFilter: 0,
-        callerPrivacy: false,
-        calleePrivacy: false,
-        callerQuality: "240 kbps • 360p",
-        calleeQuality: "240 kbps • 360p",
+        callerQuality: "32 kbps • Clear",
+        calleeQuality: "32 kbps • Clear",
         offer: null,
         answer: null,
         callerCandidates: [],
@@ -733,7 +715,7 @@ io.on("connection", (socket) => {
 
       logEvent(
         "MATCH_ESTABLISHED",
-        `🎉 1-TO-1 MATCH: ${matchedPartner.email} (Caller) <-> ${myEntry.email} (Callee)`,
+        `🎉 1-TO-1 VOICE MATCH: ${matchedPartner.email} (Caller) <-> ${myEntry.email} (Callee)`,
         {
           roomId,
           callerAttemptId: matchedPartner.attemptId,
@@ -773,7 +755,7 @@ io.on("connection", (socket) => {
     waitingQueue.set(myKey, myEntry);
     matchingLocks.delete(myKey);
 
-    logEvent("QUEUE_WAITING", `⏳ ${myEmail} waiting in queue (10s max)`, {
+    logEvent("QUEUE_WAITING", `⏳ ${myEmail} waiting in voice queue (10s max)`, {
       attemptId: myEntry.attemptId,
       waitingCount: waitingQueue.size,
     });
@@ -781,7 +763,6 @@ io.on("connection", (socket) => {
     clearQueueTimer(myKey);
     const expiryTimer = setTimeout(() => {
       const currentEntry = waitingQueue.get(myKey);
-      // Session & attempt validation: ignore if already matched or on a newer attempt
       if (
         !currentEntry ||
         currentEntry.attemptId !== incomingAttemptId ||
@@ -794,7 +775,7 @@ io.on("connection", (socket) => {
       removeFromWaitingQueue(myKey, "10s_server_timeout", true);
       logEvent(
         "QUEUE_TIMEOUT_10S",
-        `⏰ 10s elapsed — auto-removed ${myEmail} from waitingQueue`,
+        `⏰ 10s elapsed — auto-removed ${myEmail} from voice waitingQueue`,
         { attemptId: incomingAttemptId }
       );
 
@@ -836,7 +817,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // 5. IMMEDIATE QUEUE REMOVAL / ABORT (SECTION C)
+  // 5. IMMEDIATE QUEUE REMOVAL / ABORT
   socket.on("queue_leave", (payload) => {
     const email = payload?.email || socketToUser.get(socket.id);
     if (!email) return;
@@ -854,7 +835,7 @@ io.on("connection", (socket) => {
       if (roomId) {
         logEvent(
           "ABORT_DURING_HOLD",
-          `🛑 ${email} explicitly aborted room ${roomId} (${payload.reason})`
+          `🛑 ${email} explicitly aborted voice room ${roomId} (${payload.reason})`
         );
         destroyRoomAndNotifyPartner(
           roomId,
@@ -865,7 +846,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 6. ENTERED INCALL SCREEN (CANCELS ALL MATCHMAKING TIMERS — SECTION A.6)
+  // 6. ENTERED INCALLSCREENVOICE
   socket.on("entered_incall", (payload) => {
     const { roomId, email, role } = payload || {};
     const key = email ? bindUserSocket(email, socket) : null;
@@ -900,14 +881,18 @@ io.on("connection", (socket) => {
     room.lastHeartbeat = now;
     socket.join(roomId);
 
-    logEvent("ENTERED_INCALL", `🚀 ${email} (${role}) entered InCallScreen`, {
-      roomId,
-      bothEntered: room.enteredInCall,
-    });
+    logEvent(
+      "ENTERED_INCALL",
+      `🚀 ${email} (${role}) entered InCallScreenVoice`,
+      {
+        roomId,
+        bothEntered: room.enteredInCall,
+      }
+    );
   });
 
   // ==========================================================================
-  // 🎥 INCALL WEBRTC SIGNALING & STATE SYNC (WITH STALE SIGNALING PROTECTION)
+  // 🎙️ INCALL WEBRTC SIGNALING & STATE SYNC (WITH STALE SIGNALING PROTECTION)
   // ==========================================================================
   socket.on("join_room", (payload, callback) => {
     const { roomId, email } = payload || {};
@@ -926,7 +911,6 @@ io.on("connection", (socket) => {
     const callerKey = String(room.caller || "").toLowerCase();
     const calleeKey = String(room.callee || "").toLowerCase();
 
-    // Section H: Reject if user does not belong to this active room
     if (emailKey && emailKey !== callerKey && emailKey !== calleeKey) {
       if (typeof callback === "function") {
         callback({ exists: false, room: null });
@@ -959,7 +943,6 @@ io.on("connection", (socket) => {
 
     socket.emit("room_snapshot", room);
 
-    // Replay buffered WebRTC signaling for instant connection
     if (emailKey === calleeKey && room.offer) {
       socket.emit("webrtc_offer", { roomId, offer: room.offer });
     }
@@ -1028,7 +1011,7 @@ io.on("connection", (socket) => {
     if (valid.recipientSocketId) {
       io.to(valid.recipientSocketId).emit("webrtc_offer", { roomId, offer });
     }
-    logEvent("WEBRTC_OFFER", `📡 Offer forwarded in room ${roomId}`);
+    logEvent("WEBRTC_OFFER", `📡 Voice Offer forwarded in room ${roomId}`);
   });
 
   socket.on("webrtc_answer", (payload) => {
@@ -1044,12 +1027,12 @@ io.on("connection", (socket) => {
     }
     logEvent(
       "WEBRTC_ANSWER",
-      `✅ Answer forwarded in room ${roomId} — P2P Handshake Complete`
+      `✅ Voice Answer forwarded in room ${roomId} — P2P Connected`
     );
   });
 
   socket.on("webrtc_ice_candidate", (payload) => {
-    const { roomId, role, candidate } = payload || {};
+    const { roomId, candidate } = payload || {};
     if (!roomId || !candidate) return;
 
     const valid = validateSignalingParticipant(roomId, socket);
@@ -1104,7 +1087,7 @@ io.on("connection", (socket) => {
     validateSignalingParticipant(roomId, socket, email);
   });
 
-  // 7. EXPLICIT CALL & QUEUE TERMINATION EVENTS (END, NEXT, BACKGROUND, INTERNET LOST)
+  // 7. EXPLICIT CALL & QUEUE TERMINATION EVENTS (Supports both voice* and video* event names)
   const handleExplicitExit = (defaultReason) => (payload) => {
     const email =
       (typeof payload === "object" && payload?.email) ||
@@ -1127,19 +1110,22 @@ io.on("connection", (socket) => {
         defaultReason;
       logEvent(
         "EXPLICIT_EXIT",
-        `🚪 ${email || socket.id} terminated room ${roomId} (${reason})`
+        `🚪 ${email || socket.id} terminated voice room ${roomId} (${reason})`
       );
       destroyRoomAndNotifyPartner(roomId, email || emailKey, reason);
     }
   };
 
   socket.on("leave_room", handleExplicitExit("ended"));
+  socket.on("voiceend", handleExplicitExit("ended"));
   socket.on("videoend", handleExplicitExit("ended"));
+  socket.on("voicenext", handleExplicitExit("next"));
   socket.on("videonext", handleExplicitExit("next"));
+  socket.on("voicebackground", handleExplicitExit("background"));
   socket.on("videobackground", handleExplicitExit("background"));
   socket.on("checkInternet", handleExplicitExit("disconnected"));
 
-  // 8. SOCKET DISCONNECT (FORCE-CLOSE & NETWORK LOSS DETECTION — SECTIONS C & D.4/D.5)
+  // 8. SOCKET DISCONNECT (FORCE-CLOSE & NETWORK LOSS DETECTION)
   socket.on("disconnect", (disconnectReason) => {
     const emailKey = socketToUser.get(socket.id);
     if (!emailKey) return;
@@ -1150,18 +1136,18 @@ io.on("connection", (socket) => {
     }
     userToSocket.delete(emailKey);
 
-    // 1. If waiting in matchmaking queue -> remove immediately at 0ms
-    removeFromWaitingQueue(emailKey, `socket_disconnect:${disconnectReason}`, true);
+    removeFromWaitingQueue(
+      emailKey,
+      `socket_disconnect:${disconnectReason}`,
+      true
+    );
 
-    // 2. If in a room -> start disconnect detection timer
     const activeRoomId = userToRoom.get(emailKey);
     if (!activeRoomId || !activeRooms.has(activeRoomId)) return;
 
     const room = activeRooms.get(activeRoomId);
     const isProtected = (userProtectedUntil.get(emailKey) || 0) > Date.now();
 
-    // If partner disconnected during the 2s match-found transition hold, terminate within 350ms
-    // so the other user is never pushed into an empty InCallScreen!
     const graceMs = isProtected
       ? PROTECTED_DIALOG_GRACE_MS
       : room.enteredInCall
@@ -1179,7 +1165,7 @@ io.on("connection", (socket) => {
       if (!currentSocket || !currentSocket.connected) {
         logEvent(
           "DISCONNECT_TERMINATED",
-          `💀 ${emailKey} did not reconnect within ${graceMs}ms (${disconnectReason}). Terminating room ${activeRoomId}`
+          `💀 ${emailKey} did not reconnect within ${graceMs}ms (${disconnectReason}). Terminating voice room ${activeRoomId}`
         );
         destroyRoomAndNotifyPartner(activeRoomId, emailKey, "disconnected");
       }
@@ -1191,13 +1177,10 @@ io.on("connection", (socket) => {
 
 // ============================================================================
 // ⏱️ 1-SECOND REAL-TIME QUEUE & HEARTBEAT LEASE SWEEPER
-// - Enforces 10s matchmaking timeout & 4s queue heartbeat lease
-// - Enforces active-call heartbeat lease WITHOUT any maximum call duration limit!
 // ============================================================================
 setInterval(() => {
   const now = Date.now();
 
-  // 1. Sweep waitingQueue for expired (>10s) or dead-heartbeat (>4s) entries
   for (const [emailKey, entry] of waitingQueue.entries()) {
     const sock = io.sockets.sockets.get(entry.socketId);
     const isSocketDead = !sock || !sock.connected;
@@ -1223,13 +1206,11 @@ setInterval(() => {
     }
   }
 
-  // 2. Sweep activeRooms ONLY for transition-hold abandonment or dead-heartbeat lease
-  // (Active calls have UNLIMITED duration as long as heartbeats/packets arrive!)
   for (const [roomId, room] of activeRooms.entries()) {
     if (!room.enteredInCall && now - room.createdAtMs > TRANSITION_HOLD_MAX_MS) {
       logEvent(
         "HOLD_ABANDONED",
-        `Closing room ${roomId} because transition hold exceeded ${TRANSITION_HOLD_MAX_MS}ms`
+        `Closing voice room ${roomId} because transition hold exceeded ${TRANSITION_HOLD_MAX_MS}ms`
       );
       destroyRoomAndNotifyPartner(roomId, room.caller, "left");
       continue;
@@ -1241,19 +1222,21 @@ setInterval(() => {
     const calleeProtected = (userProtectedUntil.get(calleeKey) || 0) > now;
 
     if (!callerProtected && !calleeProtected) {
-      const callerSilentMs = now - (room.callerLastHeartbeat || room.createdAtMs);
-      const calleeSilentMs = now - (room.calleeLastHeartbeat || room.createdAtMs);
+      const callerSilentMs =
+        now - (room.callerLastHeartbeat || room.createdAtMs);
+      const calleeSilentMs =
+        now - (room.calleeLastHeartbeat || room.createdAtMs);
 
       if (callerSilentMs > ACTIVE_CALL_HEARTBEAT_LEASE_MS) {
         logEvent(
           "HEARTBEAT_LEASE_EXPIRED",
-          `Caller ${room.caller} heartbeat expired (${callerSilentMs}ms). Closing room ${roomId}`
+          `Caller ${room.caller} heartbeat expired (${callerSilentMs}ms). Closing voice room ${roomId}`
         );
         destroyRoomAndNotifyPartner(roomId, room.caller, "disconnected");
       } else if (calleeSilentMs > ACTIVE_CALL_HEARTBEAT_LEASE_MS) {
         logEvent(
           "HEARTBEAT_LEASE_EXPIRED",
-          `Callee ${room.callee} heartbeat expired (${calleeSilentMs}ms). Closing room ${roomId}`
+          `Callee ${room.callee} heartbeat expired (${calleeSilentMs}ms). Closing voice room ${roomId}`
         );
         destroyRoomAndNotifyPartner(roomId, room.callee, "disconnected");
       }
@@ -1263,7 +1246,7 @@ setInterval(() => {
 
 app.get("/", (req, res) => {
   res.status(200).json({
-    server: "VideoConnectServer",
+    server: "VoiceConnectServer",
     serverInstanceId: SERVER_INSTANCE_ID,
     status: "online",
     waitingInQueue: waitingQueue.size,
@@ -1279,6 +1262,6 @@ app.get("/health", (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   logEvent(
     "SERVER_START",
-    `🚀 VideoConnectServer (${SERVER_INSTANCE_ID}) running on 0.0.0.0:${PORT}`
+    `🚀 VoiceConnectServer (${SERVER_INSTANCE_ID}) running on 0.0.0.0:${PORT}`
   );
 });

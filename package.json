@@ -1,7 +1,7 @@
 {
-  "name": "videoconnectserver",
+  "name": "voiceconnectserver",
   "version": "2.0.0",
-  "description": "Ultra-Fast Real-Time Matchmaking & WebRTC Signaling Server",
+  "description": "Ultra-Fast Real-Time Voice Matchmaking & WebRTC Signaling Server",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
